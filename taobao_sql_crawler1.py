@@ -2,25 +2,33 @@
 # coding: utf-8
 
 import sys
-import sqlite3
-from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import time
 import re
 from itertools import zip_longest
+import sqlite3
+from selenium import webdriver
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import NoSuchElementException,TimeoutException
+import time
 
 def go_to_page(num_of_page, driver):
     driver.find_element_by_class_name(f"pagination-item-{num_of_page}").click()
 
+def get_page_retry(driver, url, num_retries=3):
+    if num_retries > 0:
+        try:
+            driver.get(url)
+            # return driver
+        except TimeoutException:
+            print('timeout, retrying')
+            return get_page_retry(driver, url, num_retries-1)
+        else:
+            return True
+    else:
+        return False
+
 def crawler_main(driver):
-    order_id_list = []
-    item_list = []
-    price_list = []
-    shipping_urls = []
-    order_date_list = []
-    shop_name_list = []
 
     try:
         # wait 10 seconds before looking for element
@@ -67,17 +75,15 @@ def crawler_main(driver):
             print(o,i,s1,s2)
         sys.exit(1)
 
-    print(item_list)
-    print('updating database..')
-    for order_id, order_date, item_id, price, shop_name, shipping_url in zip(order_id_list, order_date_list, item_list, price_list, shop_name_list, shipping_urls):
-        cur.execute('INSERT OR IGNORE INTO TAOBAO (order_id, order_date, item_id, price, shop_name, shipping_url) VALUES ( ?, ?, ?, ?, ?, ?)',
-                    (order_id, order_date, item_id, price, shop_name, shipping_url))
-
-    conn.commit()
-    print('database commited')
-
 
 if __name__ =="__main__":
+    order_id_list = []
+    item_list = []
+    price_list = []
+    shipping_urls = []
+    order_date_list = []
+    shop_name_list = []
+
     many = int(input("how many pages to crawl?"))
 
     chrome_options = webdriver.ChromeOptions()
@@ -93,7 +99,7 @@ if __name__ =="__main__":
 
     LOGIN_URL = 'https://login.taobao.com/member/login.jhtml?redirectURL=http%3A%2F%2Fbuyertrade.taobao.com%2Ftrade%2Fitemlist%2Flist_bought_items.htm%3Fspm%3D875.7931836%252FB.a2226mz.4.66144265Vdg7d5%26t%3D20110530'
     # PATH = "/usr/lib/chromium-browser/chromedriver"
-    PATH = "E:\chromedriver_win32\chromedriver.exe"  # windows
+    PATH = "/Volumes/HDD1/chromedriver_90"
 
 
     driver = webdriver.Chrome(executable_path=PATH, options=chrome_options)
@@ -116,3 +122,49 @@ if __name__ =="__main__":
         page_no += 1
         time.sleep(10)
 
+    print(item_list)
+    print('updating database..')
+    for order_id, order_date, item_id, price, shop_name, shipping_url in zip(order_id_list, order_date_list, item_list, price_list, shop_name_list, shipping_urls):
+        cur.execute('INSERT OR IGNORE INTO TAOBAO (order_id, order_date, item_id, price, shop_name, shipping_url) VALUES ( ?, ?, ?, ?, ?, ?)',
+                    (order_id, order_date, item_id, price, shop_name, shipping_url))
+
+    conn.commit()
+    print('database commited')
+
+    cur.execute('SELECT shipping_url FROM TAOBAO WHERE TRACKING_ID ISNULL')
+    try:
+        tracking_urls = cur.fetchall()
+    except:
+        print("No unretrived tracking URL found")
+
+    tracking_dict = {}
+
+    for each_item in tracking_urls:
+        tracking_url = each_item[0]
+        get_page_retry(driver, tracking_url)
+        try:
+            WebDriverWait(driver, 30).until(EC.title_contains("物流详情"))
+            shipping_no = driver.find_element_by_class_name("order-row").text
+            shipping_no = shipping_no.split("客服电话")[0]
+            shipping_no = shipping_no.split("运单号码： ")[-1]
+            tracking_dict[tracking_url] = shipping_no
+
+        except NoSuchElementException as e:
+            print('Specifical format in taobao wuliu info')
+            try:
+                driver.find_element_by_class_name("fweight") and driver.find_element_by_id("J_NormalLogistics")
+                tracking_dict[
+                    tracking_url] = f'运单号码：{driver.find_element_by_class_name("fweight").text} {driver.find_element_by_id("J_NormalLogistics").text}'
+            except:
+                tracking_dict[tracking_url] = 'non-standard shipping info'
+        except TimeoutException:
+            tracking_dict[tracking_url] = 'timeout'
+        finally:
+            print(f'{tracking_url} done')
+
+    for url, track_info in tracking_dict.items():
+        cur.execute('UPDATE TAOBAO SET tracking_id=? WHERE shipping_url=?', (track_info, url))
+    conn.commit()
+    print('updating db completed')
+    driver.close()
+    conn.close()
